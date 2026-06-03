@@ -1,9 +1,6 @@
 export default function Settings({ settings, updateSetting, onClose }) {
   const requestLocation = () => {
-    if (!('geolocation' in navigator)) {
-      alert('Geolocation is not supported by your browser.')
-      return
-    }
+    if (!('geolocation' in navigator)) { alert('Geolocation not supported.'); return }
     navigator.geolocation.getCurrentPosition(
       () => alert('Location access granted!'),
       (err) => alert('Location denied: ' + err.message),
@@ -20,19 +17,20 @@ export default function Settings({ settings, updateSetting, onClose }) {
 
       <div className="settings-section">
         <div className="settings-label">Map style</div>
-        <div className="settings-toggle-row">
-          <button
-            className={`style-btn ${settings.mapStyle === 'dark' ? 'active' : ''}`}
-            onClick={() => updateSetting('mapStyle', 'dark')}
-          >
-            🌑 Dark
-          </button>
-          <button
-            className={`style-btn ${settings.mapStyle === 'light' ? 'active' : ''}`}
-            onClick={() => updateSetting('mapStyle', 'light')}
-          >
-            ☀️ Light
-          </button>
+        <div className="settings-toggle-row" style={{ flexDirection: 'column', gap: 6 }}>
+          {[
+            { id: 'dark',  label: '🌑 Dark' },
+            { id: 'light', label: '☀️ Light' },
+            { id: 'brown', label: '🗺️ Light Brown' },
+          ].map(s => (
+            <button
+              key={s.id}
+              className={`style-btn ${settings.mapStyle === s.id ? 'active' : ''}`}
+              onClick={() => updateSetting('mapStyle', s.id)}
+            >
+              {s.label}
+            </button>
+          ))}
         </div>
       </div>
 
