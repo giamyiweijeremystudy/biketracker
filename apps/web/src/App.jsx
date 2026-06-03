@@ -1,78 +1,58 @@
-import { useEffect, useRef, useState } from 'react'
-import maplibregl from 'maplibre-gl'
-import { supabase } from './supabase'
+import { useEffect, useState } from 'react'
+import { supabase } from './lib/supabase'
+import MapView from './components/MapView'
+import RouteLibrary from './components/RouteLibrary'
+import Profile from './components/Profile'
+import Auth from './components/Auth'
 import './index.css'
 
 export default function App() {
-  const mapRef = useRef(null)
-  const mapInstance = useRef(null)
   const [user, setUser] = useState(null)
-  const [routes, setRoutes] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [tab, setTab] = useState('map')
+  const [selectedRoute, setSelectedRoute] = useState(null)
 
-  // Auth state
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => setUser(data.session?.user ?? null))
+    supabase.auth.getSession().then(({ data }) => {
+      setUser(data.session?.user ?? null)
+      setLoading(false)
+    })
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_, session) => {
       setUser(session?.user ?? null)
     })
     return () => subscription.unsubscribe()
   }, [])
 
-  // Init map
-  useEffect(() => {
-    if (!mapRef.current || mapInstance.current) return
-    mapInstance.current = new maplibregl.Map({
-      container: mapRef.current,
-      style: 'https://tiles.openfreemap.org/styles/liberty',
-      center: [103.8198, 1.3521], // Singapore
-      zoom: 12
-    })
-    return () => mapInstance.current?.remove()
-  }, [])
-
-  // Load routes when user is set
-  useEffect(() => {
-    if (!user) return
-    fetch(`${import.meta.env.VITE_API_URL}/routes?user_id=${user.id}`)
-      .then(r => r.json())
-      .then(setRoutes)
-  }, [user])
-
-  const signIn = () => supabase.auth.signInWithOAuth({ provider: 'github' })
-  const signOut = () => supabase.auth.signOut()
-
-  return (
-    <div style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
-      <header style={{ padding: '12px 16px', background: '#1a1a2e', color: '#fff', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <strong>🚲 BikeRoutes SG</strong>
-        {user
-          ? <button onClick={signOut} style={btnStyle}>Sign out</button>
-          : <button onClick={signIn} style={btnStyle}>Sign in with GitHub</button>
-        }
-      </header>
-      <div style={{ flex: 1, position: 'relative' }}>
-        <div ref={mapRef} style={{ width: '100%', height: '100%' }} />
-        {user && routes.length > 0 && (
-          <div style={{ position: 'absolute', top: 12, left: 12, background: '#fff', borderRadius: 8, padding: 12, maxWidth: 220, boxShadow: '0 2px 8px rgba(0,0,0,0.15)' }}>
-            <strong style={{ fontSize: 13 }}>Your routes</strong>
-            {routes.map(r => (
-              <div key={r.id} style={{ fontSize: 12, marginTop: 6, color: '#444' }}>
-                {r.name} · {(r.distance_m / 1000).toFixed(1)} km
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+  if (loading) return (
+    <div className="splash">
+      <div className="splash-logo">🚲</div>
+      <div className="splash-text">BikeRoutes SG</div>
     </div>
   )
-}
 
-const btnStyle = {
-  background: '#4f46e5',
-  color: '#fff',
-  border: 'none',
-  borderRadius: 6,
-  padding: '6px 14px',
-  cursor: 'pointer',
-  fontSize: 13
+  if (!user) return <Auth />
+
+  return (
+    <div className="app">
+      <div className="app-content">
+        {tab === 'map' && <MapView user={user} selectedRoute={selectedRoute} setSelectedRoute={setSelectedRoute} />}
+        {tab === 'routes' && <RouteLibrary user={user} onSelectRoute={(r) => { setSelectedRoute(r); setTab('map') }} />}
+        {tab === 'profile' && <Profile user={user} />}
+      </div>
+      <nav className="bottom-nav">
+        <button className={`nav-btn ${tab === 'map' ? 'active' : ''}`} onClick={() => setTab('map')}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="3 6 9 3 15 6 21 3 21 18 15 21 9 18 3 21"/><line x1="9" y1="3" x2="9" y2="18"/><line x1="15" y1="6" x2="15" y2="21"/></svg>
+          <span>Map</span>
+        </button>
+        <button className={`nav-btn ${tab === 'routes' ? 'active' : ''}`} onClick={() => setTab('routes')}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 3h18v18H3z"/><path d="M3 9h18M3 15h18M9 3v18"/></svg>
+          <span>Routes</span>
+        </button>
+        <button className={`nav-btn ${tab === 'profile' ? 'active' : ''}`} onClick={() => setTab('profile')}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>
+          <span>Profile</span>
+        </button>
+      </nav>
+    </div>
+  )
 }
