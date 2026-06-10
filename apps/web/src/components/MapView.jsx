@@ -5,14 +5,22 @@ import Toast from './Toast'
 
 const API = import.meta.env.VITE_API_URL
 const GH_KEY = import.meta.env.VITE_GH_KEY
+const OVERPASS = 'https://overpass-api.de/api/interpreter'
 
-const MAP_STYLES = {
-  dark:   { type: 'style', url: 'https://tiles.openfreemap.org/styles/dark' },
-  light:  { type: 'style', url: 'https://tiles.openfreemap.org/styles/liberty' },
-  brown:  { type: 'raster', filter: 'brightness(0.62) saturate(0.5) hue-rotate(180deg) invert(1) sepia(0.3)' },
+// Map style definitions with preview colors (no external images needed)
+export const MAP_STYLES = {
+  dark:      { label: 'Dark',        emoji: '🌑', type: 'style',  url: 'https://tiles.openfreemap.org/styles/dark' },
+  light:     { label: 'Light',       emoji: '☀️',  type: 'style',  url: 'https://tiles.openfreemap.org/styles/liberty' },
+  brown:     { label: 'Light Brown', emoji: '🗺️',  type: 'raster', filter: 'brightness(0.62) saturate(0.5) hue-rotate(180deg) invert(1) sepia(0.3)' },
+  satellite: { label: 'Satellite',   emoji: '🛰️',  type: 'raster', filter: 'none',
+    tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
+    labels: 'https://tiles.openfreemap.org/styles/dark' },
 }
 
+const OSM_TILES = ['https://a.tile.openstreetmap.org/{z}/{x}/{y}.png','https://b.tile.openstreetmap.org/{z}/{x}/{y}.png','https://c.tile.openstreetmap.org/{z}/{x}/{y}.png']
+
 const PIN_COLORS = ['#00e87a','#ff5252','#ffb74d','#64b5f6','#ce93d8','#80cbc4','#ffcc02']
+const PARK_THRESHOLD_M = 1500 // only detour to park if within this distance of route
 
 function haversineM(lat1, lon1, lat2, lon2) {
   const R = 6371000, dLat = (lat2-lat1)*Math.PI/180, dLon = (lon2-lon1)*Math.PI/180
@@ -20,13 +28,114 @@ function haversineM(lat1, lon1, lat2, lon2) {
   return 2*R*Math.atan2(Math.sqrt(a),Math.sqrt(1-a))
 }
 
-const RASTER_STYLE = {
-  version: 8,
-  sources: { osm: { type: 'raster', tiles: ['https://a.tile.openstreetmap.org/{z}/{x}/{y}.png','https://b.tile.openstreetmap.org/{z}/{x}/{y}.png','https://c.tile.openstreetmap.org/{z}/{x}/{y}.png'], tileSize: 256, attribution: '© OpenStreetMap' } },
-  layers: [{ id: 'osm', type: 'raster', source: 'osm' }]
+function midpoint(a, b) {
+  return { lat: (a.lat + b.lat) / 2, lng: (a.lng + b.lng) / 2 }
 }
 
-export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyle, preferParks }) {
+// Fetch nearby parks from Overpass and find the best one to route through
+async function findParkWaypoint(start, end) {
+  const mid = midpoint(start, end)
+  const radius = Math.min(Math.max(haversineM(start.lat, start.lng, end.lat, end.lng) * 0.8, 500), 3000)
+
+  const query = `
+    [out:json][timeout:10];
+    (
+      way["leisure"="park"](around:${Math.round(radius)},${mid.lat},${mid.lng});
+      way["leisure"="nature_reserve"](around:${Math.round(radius)},${mid.lat},${mid.lng});
+      way["route"="hiking"](around:${Math.round(radius)},${mid.lat},${mid.lng});
+      relation["leisure"="park"](around:${Math.round(radius)},${mid.lat},${mid.lng});
+    );
+    out center;
+  `
+  const res = await fetch(OVERPASS, {
+    method: 'POST',
+    body: 'data=' + encodeURIComponent(query)
+  })
+  if (!res.ok) return null
+  const data = await res.json()
+  if (!data.elements?.length) return null
+
+  // Find the park whose center is closest to the direct line between start and end
+  // and within reasonable detour distance
+  let best = null, bestScore = Infinity
+  for (const el of data.elements) {
+    const center = el.center || (el.lat ? { lat: el.lat, lon: el.lon } : null)
+    if (!center) continue
+    const lat = center.lat, lng = center.lon || center.lng
+    // Score = distance from midpoint (prefer parks close to route midpoint)
+    const distFromMid = haversineM(mid.lat, mid.lng, lat, lng)
+    const distFromStart = haversineM(start.lat, start.lng, lat, lng)
+    const distFromEnd = haversineM(end.lat, end.lng, lat, lng)
+    // Skip if it's in the completely wrong direction (adds >2x detour)
+    const directDist = haversineM(start.lat, start.lng, end.lat, end.lng)
+    if (distFromStart + distFromEnd > directDist * 2.5) continue
+    if (distFromMid < bestScore) {
+      bestScore = distFromMid
+      best = { lat, lng }
+    }
+  }
+
+  if (!best || bestScore > PARK_THRESHOLD_M) return null
+  return best
+}
+
+// Decode Valhalla's encoded polyline6
+function decodePolyline(encoded) {
+  const coords = []
+  let index = 0, lat = 0, lng = 0
+  while (index < encoded.length) {
+    let b, shift = 0, result = 0
+    do { b = encoded.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5 } while (b >= 0x20)
+    lat += (result & 1) ? ~(result >> 1) : (result >> 1)
+    shift = 0; result = 0
+    do { b = encoded.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5 } while (b >= 0x20)
+    lng += (result & 1) ? ~(result >> 1) : (result >> 1)
+    coords.push([lng / 1e6, lat / 1e6])
+  }
+  return coords
+}
+
+async function routeValhalla(waypoints) {
+  const locations = waypoints.map(p => ({ lon: p.lng, lat: p.lat }))
+  const res = await fetch('https://valhalla1.openstreetmap.de/route', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      locations,
+      costing: 'pedestrian',
+      costing_options: {
+        pedestrian: { use_roads: 0.1, use_trails: 1.0, use_living_streets: 0.3 }
+      },
+      units: 'kilometers'
+    })
+  })
+  if (!res.ok) throw new Error(`Valhalla ${res.status}`)
+  const data = await res.json()
+  if (!data.trip) throw new Error(data.error || 'No route')
+  const coords = []
+  for (const leg of data.trip.legs) coords.push(...decodePolyline(leg.shape))
+  return {
+    coords,
+    distM: data.trip.summary.length * 1000,
+    durationS: Math.round(data.trip.summary.time)
+  }
+}
+
+async function routeGH(waypoints) {
+  const pointParams = waypoints.map(p => `point=${p.lat},${p.lng}`).join('&')
+  const res = await fetch(`https://graphhopper.com/api/1/route?${pointParams}&profile=foot&points_encoded=false&key=${GH_KEY}`)
+  if (!res.ok) throw new Error(`GH ${res.status}`)
+  const data = await res.json()
+  const path = data.paths?.[0]
+  if (!path) throw new Error('No route')
+  return {
+    coords: path.points.coordinates,
+    distM: path.distance,
+    durationS: Math.round(path.time / 1000)
+  }
+}
+
+export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyle, onMapStyleChange, preferParks, onPreferParksChange }) {
   const mapRef = useRef(null)
   const map = useRef(null)
   const markersRef = useRef([])
@@ -34,11 +143,15 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
   const watchId = useRef(null)
   const points = useRef([])
   const timerRef = useRef(null)
+  const pinsRef = useRef([])
+  const preferParksRef = useRef(preferParks)
+  const mapModeRef = useRef('plan')
 
   const [mapMode, setMapMode] = useState('plan')
   const [pins, setPins] = useState([])
   const [planLoading, setPlanLoading] = useState(false)
   const [planResult, setPlanResult] = useState(null)
+  const [showMapPicker, setShowMapPicker] = useState(false)
 
   const [recording, setRecording] = useState(false)
   const [elapsed, setElapsed] = useState(0)
@@ -48,18 +161,41 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
   const [saving, setSaving] = useState(false)
   const [toast, setToast] = useState(null)
 
+  useEffect(() => { preferParksRef.current = preferParks }, [preferParks])
+  useEffect(() => { mapModeRef.current = mapMode }, [mapMode])
+
   const showToast = (msg, type = 'success') => {
     setToast({ msg, type })
     setTimeout(() => setToast(null), 3000)
   }
 
+  // ── Build maplibre style object ───────────────────
+  const buildStyle = (styleId) => {
+    const s = MAP_STYLES[styleId] || MAP_STYLES.dark
+    if (s.type === 'style') return s.url
+    if (styleId === 'satellite') {
+      return {
+        version: 8,
+        sources: {
+          sat: { type: 'raster', tiles: s.tiles, tileSize: 256, attribution: '© Esri' },
+          labels: { type: 'raster', tiles: OSM_TILES, tileSize: 256 }
+        },
+        layers: [
+          { id: 'sat', type: 'raster', source: 'sat' },
+          { id: 'labels', type: 'raster', source: 'labels', paint: { 'raster-opacity': 0.35 } }
+        ]
+      }
+    }
+    // brown raster
+    return { version: 8, sources: { osm: { type: 'raster', tiles: OSM_TILES, tileSize: 256, attribution: '© OpenStreetMap' } }, layers: [{ id: 'osm', type: 'raster', source: 'osm' }] }
+  }
+
   // ── Init map ──────────────────────────────────────
   useEffect(() => {
     if (!mapRef.current || map.current) return
-    const initStyle = mapStyle === 'brown' ? RASTER_STYLE : (MAP_STYLES[mapStyle]?.url || MAP_STYLES.dark.url)
     map.current = new maplibregl.Map({
       container: mapRef.current,
-      style: initStyle,
+      style: buildStyle(mapStyle),
       center: [103.8198, 1.3521],
       zoom: 14
     })
@@ -75,20 +211,12 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
   // ── Map style changes ─────────────────────────────
   useEffect(() => {
     if (!map.current) return
+    map.current.setStyle(buildStyle(mapStyle))
     const canvas = mapRef.current?.querySelector('canvas')
-    if (mapStyle === 'brown') {
-      map.current.setStyle(RASTER_STYLE)
-      if (canvas) canvas.style.filter = MAP_STYLES.brown.filter
-    } else {
-      map.current.setStyle(MAP_STYLES[mapStyle]?.url || MAP_STYLES.dark.url)
-      if (canvas) canvas.style.filter = 'none'
-    }
+    if (canvas) canvas.style.filter = MAP_STYLES[mapStyle]?.filter === 'none' ? 'none' : (MAP_STYLES[mapStyle]?.filter || 'none')
   }, [mapStyle])
 
-  // ── Map click handler ─────────────────────────────
-  const mapModeRef = useRef(mapMode)
-  useEffect(() => { mapModeRef.current = mapMode }, [mapMode])
-
+  // ── Map click → place pin ─────────────────────────
   useEffect(() => {
     if (!map.current) return
     const handleClick = (e) => {
@@ -110,10 +238,8 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
   const addMarkerToMap = (idx, lat, lng, num) => {
     const color = PIN_COLORS[idx % PIN_COLORS.length]
     const el = document.createElement('div')
-    el.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="36" viewBox="0 0 28 36" style="cursor:pointer"><path d="M14 0C6.27 0 0 6.27 0 14c0 9 14 22 14 22S28 23 28 14C28 6.27 21.73 0 14 0z" fill="${color}" stroke="rgba(0,0,0,0.4)" stroke-width="1.5"/><circle cx="14" cy="14" r="7" fill="rgba(0,0,0,0.3)"/><text x="14" y="19" text-anchor="middle" font-family="sans-serif" font-size="11" font-weight="700" fill="#fff">${num}</text></svg>`
-    const marker = new maplibregl.Marker({ element: el, anchor: 'bottom' })
-      .setLngLat([lng, lat])
-      .addTo(map.current)
+    el.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="36" viewBox="0 0 28 36" style="cursor:pointer;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.4))"><path d="M14 0C6.27 0 0 6.27 0 14c0 9 14 22 14 22S28 23 28 14C28 6.27 21.73 0 14 0z" fill="${color}"/><circle cx="14" cy="14" r="7" fill="rgba(0,0,0,0.25)"/><text x="14" y="19" text-anchor="middle" font-family="sans-serif" font-size="11" font-weight="700" fill="#fff">${num}</text></svg>`
+    const marker = new maplibregl.Marker({ element: el, anchor: 'bottom' }).setLngLat([lng, lat]).addTo(map.current)
     markersRef.current.push(marker)
   }
 
@@ -123,15 +249,7 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
     pinsArr.forEach((p, i) => addMarkerToMap(i, p.lat, p.lng, i + 1))
   }
 
-  const pinsRef = useRef(pins)
-  useEffect(() => { pinsRef.current = pins }, [pins])
-
-  const preferParksRef = useRef(preferParks)
-  useEffect(() => { preferParksRef.current = preferParks }, [preferParks])
-
   // ── Routing ───────────────────────────────────────
-  // Standard foot: Graphhopper free tier
-  // Prefer parks: Valhalla public instance with use_trails=1, use_roads=0.1
   const findRoute = async (pinsArr) => {
     if (pinsArr.length < 2) return
     setPlanLoading(true)
@@ -139,58 +257,29 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
     setPlanResult(null)
 
     try {
-      let coords, distM, durationS
+      let waypoints = [...pinsArr]
 
       if (preferParksRef.current) {
-        // Valhalla pedestrian with trail preference
-        const locations = pinsArr.map(p => ({ lon: p.lng, lat: p.lat }))
-        const res = await fetch('https://valhalla1.openstreetmap.de/route', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            locations,
-            costing: 'pedestrian',
-            costing_options: {
-              pedestrian: {
-                use_roads: 0.1,    // strongly avoid roads
-                use_trails: 1.0,   // strongly prefer trails/paths
-                use_living_streets: 0.5,
-              }
-            },
-            shape_match: 'walk_or_snap',
-            units: 'kilometers'
-          })
-        })
-        if (!res.ok) throw new Error(`Valhalla error ${res.status}`)
-        const data = await res.json()
-        if (!data.trip) throw new Error(data.error || 'No route')
-        // Valhalla returns one encoded polyline string per leg
-        const allCoords = []
-        for (const leg of data.trip.legs) {
-          const legCoords = decodePolyline(leg.shape)
-          allCoords.push(...legCoords)
+        // Phase 1: For each consecutive pair, try to find a park waypoint to route through
+        const enriched = [pinsArr[0]]
+        for (let i = 0; i < pinsArr.length - 1; i++) {
+          const parkWp = await findParkWaypoint(pinsArr[i], pinsArr[i + 1])
+          if (parkWp) enriched.push(parkWp)
+          enriched.push(pinsArr[i + 1])
         }
-        coords = allCoords
-        distM = data.trip.summary.length * 1000
-        durationS = Math.round(data.trip.summary.time)
-      } else {
-        // Graphhopper foot
-        const pointParams = pinsArr.map(p => `point=${p.lat},${p.lng}`).join('&')
-        const res = await fetch(`https://graphhopper.com/api/1/route?${pointParams}&profile=foot&points_encoded=false&key=${GH_KEY}`)
-        if (!res.ok) throw new Error(`Error ${res.status}`)
-        const data = await res.json()
-        const path = data.paths?.[0]
-        if (!path) throw new Error('No route returned')
-        coords = path.points.coordinates
-        distM = path.distance
-        durationS = Math.round(path.time / 1000)
+        waypoints = enriched
       }
 
-      drawRouteSegments(coords)
-      setPlanResult({
-        distKm: (distM / 1000).toFixed(2),
-        durationS
-      })
+      // Route through all waypoints using Valhalla (prefer trails) or GH (standard)
+      let result
+      try {
+        result = await routeValhalla(waypoints)
+      } catch {
+        result = await routeGH(waypoints)
+      }
+
+      drawRoute(result.coords)
+      setPlanResult({ distKm: (result.distM / 1000).toFixed(2), durationS: result.durationS })
     } catch (e) {
       console.error(e)
       showToast('Routing failed: ' + e.message, 'error')
@@ -199,52 +288,18 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
     }
   }
 
-  // Decode Valhalla's encoded polyline6 format
-  const decodePolyline = (encoded) => {
-    const coords = []
-    let index = 0, lat = 0, lng = 0
-    while (index < encoded.length) {
-      let b, shift = 0, result = 0
-      do { b = encoded.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5 } while (b >= 0x20)
-      lat += (result & 1) ? ~(result >> 1) : (result >> 1)
-      shift = 0; result = 0
-      do { b = encoded.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5 } while (b >= 0x20)
-      lng += (result & 1) ? ~(result >> 1) : (result >> 1)
-      coords.push([lng / 1e6, lat / 1e6])
-    }
-    return coords
-  }
-
-  // Draw route colored by first pin color
-  const drawRouteSegments = (coords) => {
+  const drawRoute = (coords) => {
     if (!map.current) return
-    // Color the whole route based on the first pin's color
     const color = PIN_COLORS[0]
-
     const run = () => {
       clearRouteLines()
-      const srcId = 'planned-route'
-      const glowId = 'planned-route-glow'
-      const lineId = 'planned-route-line'
-
-      map.current.addSource(srcId, {
-        type: 'geojson',
-        data: { type: 'Feature', geometry: { type: 'LineString', coordinates: coords } }
-      })
-      map.current.addLayer({
-        id: glowId, type: 'line', source: srcId,
-        paint: { 'line-color': color, 'line-width': 14, 'line-opacity': 0.18 }
-      })
-      map.current.addLayer({
-        id: lineId, type: 'line', source: srcId,
-        paint: { 'line-color': color, 'line-width': 4, 'line-opacity': 0.95 }
-      })
-      routeSourcesRef.current = [{ srcId, layers: [glowId, lineId] }]
-
+      map.current.addSource('route', { type: 'geojson', data: { type: 'Feature', geometry: { type: 'LineString', coordinates: coords } } })
+      map.current.addLayer({ id: 'route-glow', type: 'line', source: 'route', paint: { 'line-color': color, 'line-width': 14, 'line-opacity': 0.18 } })
+      map.current.addLayer({ id: 'route-line', type: 'line', source: 'route', paint: { 'line-color': color, 'line-width': 4, 'line-opacity': 0.95 } })
+      routeSourcesRef.current = [{ srcId: 'route', layers: ['route-glow', 'route-line'] }]
       const bounds = coords.reduce((b, c) => b.extend(c), new maplibregl.LngLatBounds(coords[0], coords[0]))
       map.current.fitBounds(bounds, { padding: 80, maxZoom: 17 })
     }
-
     if (map.current.loaded()) run()
     else map.current.on('load', run)
   }
@@ -349,6 +404,7 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
     <div className="map-view">
       <div ref={mapRef} className="map-container" />
 
+      {/* Left plan/record panel */}
       <div className="map-panel">
         <div className="panel-tabs">
           <button className={`panel-tab ${mapMode === 'plan' ? 'active' : ''}`} onClick={() => setMapMode('plan')}>
@@ -367,7 +423,7 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
               {pins.length === 0 && 'Tap the map to add waypoints'}
               {pins.length === 1 && 'Add another point to route'}
               {pins.length >= 2 && !planLoading && !planResult && 'Ready — tap "Find route"'}
-              {planLoading && 'Finding footpath route…'}
+              {planLoading && (preferParks ? '🌳 Finding park route…' : '🚶 Finding route…')}
               {planResult && `🚶 ${planResult.distKm} km · ${formatDuration(planResult.durationS)}`}
             </p>
 
@@ -388,7 +444,6 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
                 {planLoading ? 'Routing…' : 'Find route'}
               </button>
             )}
-
             {pins.length > 0 && (
               <button className="panel-clear-btn" onClick={clearPlan}>Clear all</button>
             )}
@@ -401,35 +456,64 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
               <>
                 <p className="panel-hint">Track your ride in real time</p>
                 <button className="record-start-btn" onClick={startRecording}>
-                  <div className="record-dot" />
-                  Start recording
+                  <div className="record-dot" /> Start recording
                 </button>
               </>
             ) : (
               <>
                 <div className="live-stats">
-                  <div className="live-stat">
-                    <span className="live-stat-val">{formatDistance(distance)}</span>
-                    <span className="live-stat-label">Distance</span>
-                  </div>
-                  <div className="live-stat">
-                    <span className="live-stat-val">{formatDuration(elapsed)}</span>
-                    <span className="live-stat-label">Time</span>
-                  </div>
-                  <div className="live-stat">
-                    <span className="live-stat-val">{elapsed > 0 ? (distance/elapsed*3.6).toFixed(1) : '0.0'}</span>
-                    <span className="live-stat-label">km/h</span>
-                  </div>
+                  <div className="live-stat"><span className="live-stat-val">{formatDistance(distance)}</span><span className="live-stat-label">Distance</span></div>
+                  <div className="live-stat"><span className="live-stat-val">{formatDuration(elapsed)}</span><span className="live-stat-label">Time</span></div>
+                  <div className="live-stat"><span className="live-stat-val">{elapsed > 0 ? (distance/elapsed*3.6).toFixed(1) : '0.0'}</span><span className="live-stat-label">km/h</span></div>
                 </div>
                 <button className="record-stop-btn" onClick={stopRecording}>
-                  <div className="stop-icon" />
-                  Stop & save
+                  <div className="stop-icon" /> Stop & save
                 </button>
               </>
             )}
           </div>
         )}
       </div>
+
+      {/* Bottom-right floating buttons */}
+      <div className="map-fab-cluster">
+        {/* Parks mode toggle */}
+        <button
+          className={`map-fab ${preferParks ? 'map-fab-active' : ''}`}
+          onClick={() => onPreferParksChange(!preferParks)}
+          title={preferParks ? 'Park routing ON' : 'Park routing OFF'}
+        >
+          🌳
+          {preferParks && <span className="map-fab-badge">ON</span>}
+        </button>
+        {/* Map style picker */}
+        <button
+          className={`map-fab ${showMapPicker ? 'map-fab-active' : ''}`}
+          onClick={() => setShowMapPicker(s => !s)}
+          title="Map style"
+        >
+          {MAP_STYLES[mapStyle]?.emoji || '🗺️'}
+        </button>
+      </div>
+
+      {/* Map style picker sidebar */}
+      {showMapPicker && (
+        <div className="map-style-picker">
+          <div className="map-style-picker-title">Map Style</div>
+          <div className="map-style-grid">
+            {Object.entries(MAP_STYLES).map(([id, s]) => (
+              <button
+                key={id}
+                className={`map-style-card ${mapStyle === id ? 'active' : ''}`}
+                onClick={() => { onMapStyleChange(id); setShowMapPicker(false) }}
+              >
+                <div className={`map-style-preview map-style-preview-${id}`}>{s.emoji}</div>
+                <span>{s.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {selectedRoute && (
         <div className="selected-route-banner">
@@ -442,10 +526,7 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
         <div className="modal-overlay" onClick={e => e.target === e.currentTarget && (() => { setShowSave(false); clearLiveTrack(); setElapsed(0); setDistance(0) })()}>
           <div className="modal">
             <div className="modal-title">Save Route</div>
-            <div className="modal-mini-stats">
-              <span>{formatDistance(distance)}</span>
-              <span>{formatDuration(elapsed)}</span>
-            </div>
+            <div className="modal-mini-stats"><span>{formatDistance(distance)}</span><span>{formatDuration(elapsed)}</span></div>
             <input className="modal-input" value={routeName} onChange={e => setRouteName(e.target.value)} placeholder="Route name" autoFocus />
             <div className="modal-actions">
               <button className="btn-ghost" onClick={() => { setShowSave(false); clearLiveTrack(); setElapsed(0); setDistance(0) }}>Discard</button>
