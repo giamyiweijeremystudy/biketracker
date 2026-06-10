@@ -28,23 +28,11 @@ function haversineM(lat1, lon1, lat2, lon2) {
 
 
 
-// Decode Valhalla's encoded polyline6
-function decodePolyline(encoded) {
-  const coords = []
-  let index = 0, lat = 0, lng = 0
-  while (index < encoded.length) {
-    let b, shift = 0, result = 0
-    do { b = encoded.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5 } while (b >= 0x20)
-    lat += (result & 1) ? ~(result >> 1) : (result >> 1)
-    shift = 0; result = 0
-    do { b = encoded.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5 } while (b >= 0x20)
-    lng += (result & 1) ? ~(result >> 1) : (result >> 1)
-    coords.push([lng / 1e6, lat / 1e6])
-  }
-  return coords
-}
 
-async function routeGH(waypoints) {
+const GH_MAX_POINTS = 5
+
+async function routeGHChunk(waypoints) {
+  // Single chunk — standard request
   const pointParams = waypoints.map(p => `point=${p.lat},${p.lng}`).join('&')
   const res = await fetch(`https://graphhopper.com/api/1/route?${pointParams}&profile=foot&points_encoded=false&key=${GH_KEY}`)
   if (!res.ok) {
@@ -54,11 +42,34 @@ async function routeGH(waypoints) {
   const data = await res.json()
   const path = data.paths?.[0]
   if (!path) throw new Error('No route')
-  return {
-    coords: path.points.coordinates,
-    distM: path.distance,
-    durationS: Math.round(path.time / 1000)
+  return { coords: path.points.coordinates, distM: path.distance, durationS: Math.round(path.time / 1000) }
+}
+
+async function routeGH(waypoints) {
+  if (waypoints.length <= GH_MAX_POINTS) {
+    return routeGHChunk(waypoints)
   }
+
+  // Split into overlapping chunks of GH_MAX_POINTS, each sharing an endpoint
+  // e.g. [A,B,C,D,E,F,G,H] with max 5 → [A,B,C,D,E], [E,F,G,H]
+  const chunks = []
+  for (let i = 0; i < waypoints.length - 1; i += GH_MAX_POINTS - 1) {
+    chunks.push(waypoints.slice(i, i + GH_MAX_POINTS))
+    if (i + GH_MAX_POINTS >= waypoints.length) break
+  }
+
+  // Route each chunk in parallel
+  const results = await Promise.all(chunks.map(chunk => routeGHChunk(chunk)))
+
+  // Join: skip the first coord of each subsequent chunk (it's the same as last of previous)
+  const allCoords = results[0].coords
+  for (let i = 1; i < results.length; i++) {
+    allCoords.push(...results[i].coords.slice(1))
+  }
+  const totalDist = results.reduce((s, r) => s + r.distM, 0)
+  const totalDur = results.reduce((s, r) => s + r.durationS, 0)
+
+  return { coords: allCoords, distM: totalDist, durationS: totalDur }
 }
 
 export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyle, onMapStyleChange }) {
