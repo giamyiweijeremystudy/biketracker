@@ -5,7 +5,6 @@ import Toast from './Toast'
 
 const API = import.meta.env.VITE_API_URL
 const GH_KEY = import.meta.env.VITE_GH_KEY
-const OVERPASS = 'https://overpass.kumi.systems/api/interpreter'
 
 // Map style definitions with preview colors (no external images needed)
 export const MAP_STYLES = {
@@ -20,7 +19,6 @@ export const MAP_STYLES = {
 const OSM_TILES = ['https://a.tile.openstreetmap.org/{z}/{x}/{y}.png','https://b.tile.openstreetmap.org/{z}/{x}/{y}.png','https://c.tile.openstreetmap.org/{z}/{x}/{y}.png']
 
 const PIN_COLORS = ['#00e87a','#ff5252','#ffb74d','#64b5f6','#ce93d8','#80cbc4','#ffcc02']
-const PARK_THRESHOLD_M = 1500 // only detour to park if within this distance of route
 
 function haversineM(lat1, lon1, lat2, lon2) {
   const R = 6371000, dLat = (lat2-lat1)*Math.PI/180, dLon = (lon2-lon1)*Math.PI/180
@@ -28,56 +26,7 @@ function haversineM(lat1, lon1, lat2, lon2) {
   return 2*R*Math.atan2(Math.sqrt(a),Math.sqrt(1-a))
 }
 
-function midpoint(a, b) {
-  return { lat: (a.lat + b.lat) / 2, lng: (a.lng + b.lng) / 2 }
-}
 
-// Fetch nearby parks from Overpass and find the best one to route through
-async function findParkWaypoint(start, end) {
-  const mid = midpoint(start, end)
-  const radius = Math.min(Math.max(haversineM(start.lat, start.lng, end.lat, end.lng) * 0.8, 500), 3000)
-
-  const query = `
-    [out:json][timeout:10];
-    (
-      way["leisure"="park"](around:${Math.round(radius)},${mid.lat},${mid.lng});
-      way["leisure"="nature_reserve"](around:${Math.round(radius)},${mid.lat},${mid.lng});
-      way["route"="hiking"](around:${Math.round(radius)},${mid.lat},${mid.lng});
-      relation["leisure"="park"](around:${Math.round(radius)},${mid.lat},${mid.lng});
-    );
-    out center;
-  `
-  const res = await fetch(OVERPASS, {
-    method: 'POST',
-    body: 'data=' + encodeURIComponent(query)
-  })
-  if (!res.ok) return null
-  const data = await res.json()
-  if (!data.elements?.length) return null
-
-  // Find the park whose center is closest to the direct line between start and end
-  // and within reasonable detour distance
-  let best = null, bestScore = Infinity
-  for (const el of data.elements) {
-    const center = el.center || (el.lat ? { lat: el.lat, lon: el.lon } : null)
-    if (!center) continue
-    const lat = center.lat, lng = center.lon || center.lng
-    // Score = distance from midpoint (prefer parks close to route midpoint)
-    const distFromMid = haversineM(mid.lat, mid.lng, lat, lng)
-    const distFromStart = haversineM(start.lat, start.lng, lat, lng)
-    const distFromEnd = haversineM(end.lat, end.lng, lat, lng)
-    // Skip if it's in the completely wrong direction (adds >2x detour)
-    const directDist = haversineM(start.lat, start.lng, end.lat, end.lng)
-    if (distFromStart + distFromEnd > directDist * 2.5) continue
-    if (distFromMid < bestScore) {
-      bestScore = distFromMid
-      best = { lat, lng }
-    }
-  }
-
-  if (!best || bestScore > PARK_THRESHOLD_M) return null
-  return best
-}
 
 // Decode Valhalla's encoded polyline6
 function decodePolyline(encoded) {
@@ -112,7 +61,7 @@ async function routeGH(waypoints) {
   }
 }
 
-export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyle, onMapStyleChange, preferParks, onPreferParksChange }) {
+export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyle, onMapStyleChange }) {
   const mapRef = useRef(null)
   const map = useRef(null)
   const markersRef = useRef([])
@@ -121,7 +70,6 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
   const points = useRef([])
   const timerRef = useRef(null)
   const pinsRef = useRef([])
-  const preferParksRef = useRef(preferParks)
   const mapModeRef = useRef('plan')
 
   const [mapMode, setMapMode] = useState('plan')
@@ -138,7 +86,6 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
   const [saving, setSaving] = useState(false)
   const [toast, setToast] = useState(null)
 
-  useEffect(() => { preferParksRef.current = preferParks }, [preferParks])
   useEffect(() => { mapModeRef.current = mapMode }, [mapMode])
 
   const showToast = (msg, type = 'success') => {
@@ -255,21 +202,7 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
     setPlanResult(null)
 
     try {
-      let waypoints = [...pinsArr]
-
-      if (preferParksRef.current) {
-        // Phase 1: For each consecutive pair, try to find a park waypoint to route through
-        const enriched = [pinsArr[0]]
-        for (let i = 0; i < pinsArr.length - 1; i++) {
-          const parkWp = await findParkWaypoint(pinsArr[i], pinsArr[i + 1])
-          if (parkWp) enriched.push(parkWp)
-          enriched.push(pinsArr[i + 1])
-        }
-        waypoints = enriched
-      }
-
-      // Route through all waypoints using Graphhopper foot profile
-      const result = await routeGH(waypoints)
+      const result = await routeGH(pinsArr)
 
       drawRoute(result.coords)
       setPlanResult({ distKm: (result.distM / 1000).toFixed(2), durationS: result.durationS })
@@ -470,16 +403,6 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
 
       {/* Bottom-right floating buttons */}
       <div className="map-fab-cluster">
-        {/* Parks mode toggle */}
-        <button
-          className={`map-fab ${preferParks ? 'map-fab-active' : ''}`}
-          onClick={() => onPreferParksChange(!preferParks)}
-          title={preferParks ? 'Park routing ON' : 'Park routing OFF'}
-        >
-          🌳
-          {preferParks && <span className="map-fab-badge">ON</span>}
-        </button>
-        {/* Map style picker */}
         <button
           className={`map-fab ${showMapPicker ? 'map-fab-active' : ''}`}
           onClick={() => setShowMapPicker(s => !s)}
