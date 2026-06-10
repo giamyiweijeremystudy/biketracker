@@ -5,7 +5,7 @@ import Toast from './Toast'
 
 const API = import.meta.env.VITE_API_URL
 const GH_KEY = import.meta.env.VITE_GH_KEY
-const OVERPASS = 'https://overpass-api.de/api/interpreter'
+const OVERPASS = 'https://overpass.kumi.systems/api/interpreter'
 
 // Map style definitions with preview colors (no external images needed)
 export const MAP_STYLES = {
@@ -164,13 +164,13 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
           },
           hybrid: {
             type: 'raster',
-            tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}'],
+            tiles: ['https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}'],
             tileSize: 256,
           }
         },
         layers: [
           { id: 'sat',    type: 'raster', source: 'sat' },
-          { id: 'hybrid', type: 'raster', source: 'hybrid', paint: { 'raster-opacity': 1 } },
+          { id: 'hybrid', type: 'raster', source: 'hybrid' },
         ]
       }
     }
