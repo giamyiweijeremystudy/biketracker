@@ -129,7 +129,9 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
   const preferParksRef = useRef(preferParks)
   useEffect(() => { preferParksRef.current = preferParks }, [preferParks])
 
-  // ── Routing via Graphhopper ───────────────────────
+  // ── Routing ───────────────────────────────────────
+  // Standard foot: Graphhopper free tier
+  // Prefer parks: Valhalla public instance with use_trails=1, use_roads=0.1
   const findRoute = async (pinsArr) => {
     if (pinsArr.length < 2) return
     setPlanLoading(true)
@@ -137,26 +139,52 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
     setPlanResult(null)
 
     try {
-      // foot = standard pedestrian routing
-      // hike = prefers trails, footpaths, parks over roads (free tier supported)
-      const profile = preferParksRef.current ? 'hike' : 'foot'
-      const pointParams = pinsArr.map(p => `point=${p.lat},${p.lng}`).join('&')
-      const url = `https://graphhopper.com/api/1/route?${pointParams}&profile=${profile}&points_encoded=false&key=${GH_KEY}`
-      const res = await fetch(url)
+      let coords, distM, durationS
 
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.message || `Error ${res.status}`)
+      if (preferParksRef.current) {
+        // Valhalla pedestrian with trail preference
+        const locations = pinsArr.map(p => ({ lon: p.lng, lat: p.lat }))
+        const res = await fetch('https://valhalla1.openstreetmap.de/route', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            locations,
+            costing: 'pedestrian',
+            costing_options: {
+              pedestrian: {
+                use_roads: 0.1,    // strongly avoid roads
+                use_trails: 1.0,   // strongly prefer trails/paths
+                use_living_streets: 0.5,
+              }
+            },
+            shape_match: 'walk_or_snap',
+            units: 'kilometers'
+          })
+        })
+        if (!res.ok) throw new Error(`Valhalla error ${res.status}`)
+        const data = await res.json()
+        if (!data.trip) throw new Error(data.error || 'No route')
+        // Valhalla returns encoded polyline — decode it
+        coords = decodePolyline(data.trip.legs.flatMap(l => l.shape))
+        distM = data.trip.summary.length * 1000
+        durationS = Math.round(data.trip.summary.time)
+      } else {
+        // Graphhopper foot
+        const pointParams = pinsArr.map(p => `point=${p.lat},${p.lng}`).join('&')
+        const res = await fetch(`https://graphhopper.com/api/1/route?${pointParams}&profile=foot&points_encoded=false&key=${GH_KEY}`)
+        if (!res.ok) throw new Error(`Error ${res.status}`)
+        const data = await res.json()
+        const path = data.paths?.[0]
+        if (!path) throw new Error('No route returned')
+        coords = path.points.coordinates
+        distM = path.distance
+        durationS = Math.round(path.time / 1000)
       }
 
-      const data = await res.json()
-      const path = data.paths?.[0]
-      if (!path) throw new Error('No route returned')
-
-      drawRouteSegments(path.points.coordinates)
+      drawRouteSegments(coords)
       setPlanResult({
-        distKm: (path.distance / 1000).toFixed(2),
-        durationS: Math.round(path.time / 1000)
+        distKm: (distM / 1000).toFixed(2),
+        durationS
       })
     } catch (e) {
       console.error(e)
@@ -164,6 +192,22 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
     } finally {
       setPlanLoading(false)
     }
+  }
+
+  // Decode Valhalla's encoded polyline6 format
+  const decodePolyline = (encoded) => {
+    const coords = []
+    let index = 0, lat = 0, lng = 0
+    while (index < encoded.length) {
+      let b, shift = 0, result = 0
+      do { b = encoded.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5 } while (b >= 0x20)
+      lat += (result & 1) ? ~(result >> 1) : (result >> 1)
+      shift = 0; result = 0
+      do { b = encoded.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5 } while (b >= 0x20)
+      lng += (result & 1) ? ~(result >> 1) : (result >> 1)
+      coords.push([lng / 1e6, lat / 1e6])
+    }
+    return coords
   }
 
   // Draw route colored by first pin color
