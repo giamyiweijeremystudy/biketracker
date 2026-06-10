@@ -215,19 +215,29 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
   }
 
   const drawRoute = (coords) => {
-    if (!map.current) return
+    if (!map.current || !coords?.length) return
     const color = PIN_COLORS[0]
     const run = () => {
-      clearRouteLines()
-      map.current.addSource('route', { type: 'geojson', data: { type: 'Feature', geometry: { type: 'LineString', coordinates: coords } } })
-      map.current.addLayer({ id: 'route-glow', type: 'line', source: 'route', paint: { 'line-color': color, 'line-width': 14, 'line-opacity': 0.18 } })
-      map.current.addLayer({ id: 'route-line', type: 'line', source: 'route', paint: { 'line-color': color, 'line-width': 4, 'line-opacity': 0.95 } })
-      routeSourcesRef.current = [{ srcId: 'route', layers: ['route-glow', 'route-line'] }]
-      const bounds = coords.reduce((b, c) => b.extend(c), new maplibregl.LngLatBounds(coords[0], coords[0]))
-      map.current.fitBounds(bounds, { padding: 80, maxZoom: 17 })
+      // Clean up first
+      try { map.current.removeLayer('route-glow') } catch {}
+      try { map.current.removeLayer('route-line') } catch {}
+      try { map.current.removeSource('route') } catch {}
+      routeSourcesRef.current = []
+
+      try {
+        map.current.addSource('route', { type: 'geojson', data: { type: 'Feature', geometry: { type: 'LineString', coordinates: coords } } })
+        map.current.addLayer({ id: 'route-glow', type: 'line', source: 'route', paint: { 'line-color': color, 'line-width': 14, 'line-opacity': 0.18 } })
+        map.current.addLayer({ id: 'route-line', type: 'line', source: 'route', paint: { 'line-color': color, 'line-width': 4, 'line-opacity': 0.95 } })
+        routeSourcesRef.current = [{ srcId: 'route', layers: ['route-glow', 'route-line'] }]
+        const bounds = coords.reduce((b, c) => b.extend(c), new maplibregl.LngLatBounds(coords[0], coords[0]))
+        map.current.fitBounds(bounds, { padding: 80, maxZoom: 17 })
+      } catch (e) {
+        console.error('drawRoute error:', e)
+      }
     }
-    if (map.current.loaded()) run()
-    else map.current.on('load', run)
+
+    if (map.current.isStyleLoaded()) run()
+    else map.current.once('styledata', run)
   }
 
   const clearRouteLines = () => {
@@ -260,16 +270,19 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
   useEffect(() => {
     if (!map.current || !selectedRoute) return
     const run = () => {
-      try { map.current.removeLayer('sel-route'); map.current.removeSource('sel-route') } catch {}
+      try { map.current.removeLayer('sel-route') } catch {}
+      try { map.current.removeSource('sel-route') } catch {}
       if (!selectedRoute.route_points?.length) return
       const coords = [...selectedRoute.route_points].sort((a, b) => a.seq - b.seq).map(p => [p.lng, p.lat])
-      map.current.addSource('sel-route', { type: 'geojson', data: { type: 'Feature', geometry: { type: 'LineString', coordinates: coords } } })
-      map.current.addLayer({ id: 'sel-route', type: 'line', source: 'sel-route', paint: { 'line-color': '#ffb74d', 'line-width': 4, 'line-opacity': 0.9 } })
-      const bounds = coords.reduce((b, c) => b.extend(c), new maplibregl.LngLatBounds(coords[0], coords[0]))
-      map.current.fitBounds(bounds, { padding: 60, maxZoom: 16 })
+      try {
+        map.current.addSource('sel-route', { type: 'geojson', data: { type: 'Feature', geometry: { type: 'LineString', coordinates: coords } } })
+        map.current.addLayer({ id: 'sel-route', type: 'line', source: 'sel-route', paint: { 'line-color': '#ffb74d', 'line-width': 4, 'line-opacity': 0.9 } })
+        const bounds = coords.reduce((b, c) => b.extend(c), new maplibregl.LngLatBounds(coords[0], coords[0]))
+        map.current.fitBounds(bounds, { padding: 60, maxZoom: 16 })
+      } catch (e) { console.error(e) }
     }
-    if (map.current.loaded()) run()
-    else map.current.on('load', run)
+    if (map.current.isStyleLoaded()) run()
+    else map.current.once('styledata', run)
     return () => { try { map.current?.removeLayer('sel-route'); map.current?.removeSource('sel-route') } catch {} }
   }, [selectedRoute])
 
