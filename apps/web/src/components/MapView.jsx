@@ -164,8 +164,13 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
         if (!res.ok) throw new Error(`Valhalla error ${res.status}`)
         const data = await res.json()
         if (!data.trip) throw new Error(data.error || 'No route')
-        // Valhalla returns encoded polyline — decode it
-        coords = decodePolyline(data.trip.legs.flatMap(l => l.shape))
+        // Valhalla returns one encoded polyline string per leg
+        const allCoords = []
+        for (const leg of data.trip.legs) {
+          const legCoords = decodePolyline(leg.shape)
+          allCoords.push(...legCoords)
+        }
+        coords = allCoords
         distM = data.trip.summary.length * 1000
         durationS = Math.round(data.trip.summary.time)
       } else {
