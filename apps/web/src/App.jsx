@@ -88,7 +88,9 @@ export default function App() {
               selectedRoute={selectedRoute}
               setSelectedRoute={setSelectedRoute}
               mapStyle={settings.mapStyle}
+              onMapStyleChange={(s) => updateSetting('mapStyle', s)}
               preferParks={settings.preferParks}
+              onPreferParksChange={(v) => updateSetting('preferParks', v)}
             />
           )}
           {tab === 'routes' && (
@@ -100,11 +102,8 @@ export default function App() {
           {tab === 'profile' && <Profile user={user} />}
         </main>
 
-        {/* Settings panel */}
         {showSettings && (
           <Settings
-            settings={settings}
-            updateSetting={updateSetting}
             onClose={() => setShowSettings(false)}
           />
         )}
