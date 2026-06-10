@@ -26,7 +26,7 @@ const RASTER_STYLE = {
   layers: [{ id: 'osm', type: 'raster', source: 'osm' }]
 }
 
-export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyle }) {
+export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyle, preferParks }) {
   const mapRef = useRef(null)
   const map = useRef(null)
   const markersRef = useRef([])
@@ -131,10 +131,45 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
     setPlanResult(null)
 
     try {
-      // Graphhopper accepts multiple points, foot profile follows pedestrian paths
       const pointParams = pinsArr.map(p => `point=${p.lat},${p.lng}`).join('&')
-      const url = `https://graphhopper.com/api/1/route?${pointParams}&profile=foot&points_encoded=false&key=${GH_KEY}`
-      const res = await fetch(url)
+
+      let res
+      if (preferParks) {
+        // Use custom_model via POST to heavily weight park/green paths
+        const url = `https://graphhopper.com/api/1/route?key=${GH_KEY}`
+        res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            points: pinsArr.map(p => [p.lng, p.lat]),
+            profile: 'foot',
+            points_encoded: false,
+            'ch.disable': true,
+            custom_model: {
+              priority: [
+                // Strongly prefer parks, nature reserves, leisure paths
+                { if: 'way["leisure"] == "park"',            multiply_by: '3.0' },
+                { if: 'way["leisure"] == "nature_reserve"',  multiply_by: '3.0' },
+                { if: 'way["route"] == "hiking"',            multiply_by: '2.5' },
+                { if: 'way["highway"] == "cycleway" && way["foot"] != "no"', multiply_by: '2.0' },
+                { if: 'way["highway"] == "path"',            multiply_by: '2.0' },
+                { if: 'way["highway"] == "footway"',         multiply_by: '2.0' },
+                { if: 'way["highway"] == "pedestrian"',      multiply_by: '1.8' },
+                { if: 'way["highway"] == "track"',           multiply_by: '1.5' },
+                // Discourage roads
+                { if: 'way["highway"] == "primary"',         multiply_by: '0.2' },
+                { if: 'way["highway"] == "secondary"',       multiply_by: '0.3' },
+                { if: 'way["highway"] == "tertiary"',        multiply_by: '0.5' },
+                { if: 'way["highway"] == "residential"',     multiply_by: '0.7' },
+              ]
+            }
+          })
+        })
+      } else {
+        // Standard foot routing
+        const url = `https://graphhopper.com/api/1/route?${pointParams}&profile=foot&points_encoded=false&key=${GH_KEY}`
+        res = await fetch(url)
+      }
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
