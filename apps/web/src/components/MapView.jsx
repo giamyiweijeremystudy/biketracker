@@ -362,7 +362,7 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
               {pins.length === 0 && 'Tap the map to add waypoints'}
               {pins.length === 1 && 'Add another point to route'}
               {pins.length >= 2 && !planLoading && !planResult && 'Ready — tap "Find route"'}
-              {planLoading && (preferParks ? '🌳 Finding park route…' : '🚶 Finding route…')}
+              {planLoading && '🚶 Finding route…'}
               {planResult && `🚶 ${planResult.distKm} km · ${formatDuration(planResult.durationS)}`}
             </p>
 
