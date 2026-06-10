@@ -4,36 +4,41 @@ import { formatDistance, formatDuration } from '../lib/utils'
 import Toast from './Toast'
 
 const API = import.meta.env.VITE_API_URL
-const OSRM = 'https://router.project-osrm.org/route/v1/foot'
+const GH_KEY = import.meta.env.VITE_GH_KEY
 
 const MAP_STYLES = {
   dark:   { type: 'style', url: 'https://tiles.openfreemap.org/styles/dark' },
   light:  { type: 'style', url: 'https://tiles.openfreemap.org/styles/liberty' },
-  brown:  { type: 'raster', url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', filter: 'brightness(0.62) saturate(0.5) hue-rotate(180deg) invert(1) sepia(0.3)' },
+  brown:  { type: 'raster', filter: 'brightness(0.62) saturate(0.5) hue-rotate(180deg) invert(1) sepia(0.3)' },
 }
 
 const PIN_COLORS = ['#00e87a','#ff5252','#ffb74d','#64b5f6','#ce93d8','#80cbc4','#ffcc02']
 
 function haversineM(lat1, lon1, lat2, lon2) {
-  const R = 6371000, dLat = (lat2 - lat1) * Math.PI / 180, dLon = (lon2 - lon1) * Math.PI / 180
+  const R = 6371000, dLat = (lat2-lat1)*Math.PI/180, dLon = (lon2-lon1)*Math.PI/180
   const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2
-  return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+  return 2*R*Math.atan2(Math.sqrt(a),Math.sqrt(1-a))
+}
+
+const RASTER_STYLE = {
+  version: 8,
+  sources: { osm: { type: 'raster', tiles: ['https://a.tile.openstreetmap.org/{z}/{x}/{y}.png','https://b.tile.openstreetmap.org/{z}/{x}/{y}.png','https://c.tile.openstreetmap.org/{z}/{x}/{y}.png'], tileSize: 256, attribution: '© OpenStreetMap' } },
+  layers: [{ id: 'osm', type: 'raster', source: 'osm' }]
 }
 
 export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyle }) {
   const mapRef = useRef(null)
   const map = useRef(null)
   const markersRef = useRef([])
-  const routeLayersRef = useRef([])
+  const routeSourcesRef = useRef([])
   const watchId = useRef(null)
   const points = useRef([])
   const timerRef = useRef(null)
-  const rasterLayerRef = useRef(null)
 
   const [mapMode, setMapMode] = useState('plan')
   const [pins, setPins] = useState([])
   const [planLoading, setPlanLoading] = useState(false)
-  const [planResult, setPlanResult] = useState(null) // { distKm, durationS }
+  const [planResult, setPlanResult] = useState(null)
 
   const [recording, setRecording] = useState(false)
   const [elapsed, setElapsed] = useState(0)
@@ -45,17 +50,13 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
 
   const showToast = (msg, type = 'success') => {
     setToast({ msg, type })
-    setTimeout(() => setToast(null), 2500)
+    setTimeout(() => setToast(null), 3000)
   }
 
   // ── Init map ──────────────────────────────────────
   useEffect(() => {
     if (!mapRef.current || map.current) return
-    const style = MAP_STYLES[mapStyle] || MAP_STYLES.dark
-    const initStyle = style.type === 'raster'
-      ? { version: 8, sources: { osm: { type: 'raster', tiles: ['https://a.tile.openstreetmap.org/{z}/{x}/{y}.png','https://b.tile.openstreetmap.org/{z}/{x}/{y}.png','https://c.tile.openstreetmap.org/{z}/{x}/{y}.png'], tileSize: 256, attribution: '© OpenStreetMap' } }, layers: [{ id: 'osm', type: 'raster', source: 'osm' }] }
-      : style.url
-
+    const initStyle = mapStyle === 'brown' ? RASTER_STYLE : (MAP_STYLES[mapStyle]?.url || MAP_STYLES.dark.url)
     map.current = new maplibregl.Map({
       container: mapRef.current,
       style: initStyle,
@@ -68,58 +69,48 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
       trackUserLocation: true,
       showUserHeading: true
     }), 'top-right')
-
-    map.current.on('click', handleMapClick)
     return () => map.current?.remove()
   }, [])
 
   // ── Map style changes ─────────────────────────────
   useEffect(() => {
     if (!map.current) return
-    const style = MAP_STYLES[mapStyle] || MAP_STYLES.dark
-
-    // Apply CSS filter to canvas for raster style
     const canvas = mapRef.current?.querySelector('canvas')
-
-    if (style.type === 'raster') {
-      map.current.setStyle({
-        version: 8,
-        sources: { osm: { type: 'raster', tiles: ['https://a.tile.openstreetmap.org/{z}/{x}/{y}.png','https://b.tile.openstreetmap.org/{z}/{x}/{y}.png','https://c.tile.openstreetmap.org/{z}/{x}/{y}.png'], tileSize: 256, attribution: '© OpenStreetMap' } },
-        layers: [{ id: 'osm', type: 'raster', source: 'osm' }]
-      })
-      if (canvas) canvas.style.filter = style.filter
+    if (mapStyle === 'brown') {
+      map.current.setStyle(RASTER_STYLE)
+      if (canvas) canvas.style.filter = MAP_STYLES.brown.filter
     } else {
-      map.current.setStyle(style.url)
+      map.current.setStyle(MAP_STYLES[mapStyle]?.url || MAP_STYLES.dark.url)
       if (canvas) canvas.style.filter = 'none'
     }
   }, [mapStyle])
 
-  // ── Map click → add pin (plan mode only) ─────────
-  const handleMapClick = useCallback((e) => {
-    if (mapMode !== 'plan') return
-    const { lng, lat } = e.lngLat
-    setPins(prev => {
-      const next = [...prev, { lat, lng, id: Date.now() }]
-      addMarkerToMap(next.length - 1, lat, lng, next.length)
-      return next
-    })
-    clearRouteLines()
-    setPlanResult(null)
-  }, [mapMode])
+  // ── Map click handler ─────────────────────────────
+  const mapModeRef = useRef(mapMode)
+  useEffect(() => { mapModeRef.current = mapMode }, [mapMode])
 
   useEffect(() => {
     if (!map.current) return
-    map.current.off('click', handleMapClick)
-    map.current.on('click', handleMapClick)
-  }, [handleMapClick])
+    const handleClick = (e) => {
+      if (mapModeRef.current !== 'plan') return
+      const { lng, lat } = e.lngLat
+      setPins(prev => {
+        const next = [...prev, { lat, lng, id: Date.now() }]
+        setTimeout(() => addMarkerToMap(next.length - 1, lat, lng, next.length), 0)
+        return next
+      })
+      clearRouteLines()
+      setPlanResult(null)
+    }
+    map.current.on('click', handleClick)
+    return () => map.current?.off('click', handleClick)
+  }, [])
 
   // ── Markers ───────────────────────────────────────
-  const addMarkerToMap = (idx, lat, lng, total) => {
+  const addMarkerToMap = (idx, lat, lng, num) => {
     const color = PIN_COLORS[idx % PIN_COLORS.length]
     const el = document.createElement('div')
-    el.className = 'map-pin'
-    el.style.cssText = `width:28px;height:36px;cursor:pointer;`
-    el.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="36" viewBox="0 0 28 36"><path d="M14 0C6.27 0 0 6.27 0 14c0 9 14 22 14 22S28 23 28 14C28 6.27 21.73 0 14 0z" fill="${color}" stroke="rgba(0,0,0,0.4)" stroke-width="1.5"/><circle cx="14" cy="14" r="7" fill="rgba(0,0,0,0.3)"/><text x="14" y="19" text-anchor="middle" font-family="sans-serif" font-size="11" font-weight="700" fill="#fff">${total}</text></svg>`
+    el.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="36" viewBox="0 0 28 36" style="cursor:pointer"><path d="M14 0C6.27 0 0 6.27 0 14c0 9 14 22 14 22S28 23 28 14C28 6.27 21.73 0 14 0z" fill="${color}" stroke="rgba(0,0,0,0.4)" stroke-width="1.5"/><circle cx="14" cy="14" r="7" fill="rgba(0,0,0,0.3)"/><text x="14" y="19" text-anchor="middle" font-family="sans-serif" font-size="11" font-weight="700" fill="#fff">${num}</text></svg>`
     const marker = new maplibregl.Marker({ element: el, anchor: 'bottom' })
       .setLngLat([lng, lat])
       .addTo(map.current)
@@ -132,51 +123,82 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
     pinsArr.forEach((p, i) => addMarkerToMap(i, p.lat, p.lng, i + 1))
   }
 
-  // ── Routing ───────────────────────────────────────
+  // ── Routing via Graphhopper (foot profile) ───────
   const findRoute = async (pinsArr) => {
     if (pinsArr.length < 2) return
     setPlanLoading(true)
     clearRouteLines()
     setPlanResult(null)
+
     try {
-      const coords = pinsArr.map(p => `${p.lng},${p.lat}`).join(';')
-      const url = `${OSRM}/${coords}?overview=full&geometries=geojson`
+      // Graphhopper accepts multiple points, foot profile follows pedestrian paths
+      const pointParams = pinsArr.map(p => `point=${p.lat},${p.lng}`).join('&')
+      const url = `https://graphhopper.com/api/1/route?${pointParams}&profile=foot&points_encoded=false&key=${GH_KEY}`
       const res = await fetch(url)
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.message || `Error ${res.status}`)
+      }
+
       const data = await res.json()
-      if (data.code !== 'Ok' || !data.routes?.length) throw new Error('No route')
-      const route = data.routes[0]
-      drawRoute(route.geometry.coordinates)
-      setPlanResult({ distKm: (route.distance / 1000).toFixed(2), durationS: Math.round(route.duration) })
+      const path = data.paths?.[0]
+      if (!path) throw new Error('No route returned')
+
+      const coords = path.points.coordinates
+      drawRouteSegments(pinsArr, coords)
+      setPlanResult({
+        distKm: (path.distance / 1000).toFixed(2),
+        durationS: Math.round(path.time / 1000)
+      })
     } catch (e) {
-      showToast('Could not find a footpath route', 'error')
+      console.error(e)
+      showToast('Routing failed: ' + e.message, 'error')
     } finally {
       setPlanLoading(false)
     }
   }
 
-  const drawRoute = (coords) => {
+  // Draw route with segments colored by first-pin color
+  const drawRouteSegments = (pinsArr, coords) => {
     if (!map.current) return
+    // Color the whole route based on the first pin's color
+    const color = PIN_COLORS[0]
+
     const run = () => {
       clearRouteLines()
-      const id = 'planned-route'
-      const idGlow = 'planned-route-glow'
-      map.current.addSource(id, { type: 'geojson', data: { type: 'Feature', geometry: { type: 'LineString', coordinates: coords } } })
-      map.current.addLayer({ id: idGlow, type: 'line', source: id, paint: { 'line-color': '#00e87a', 'line-width': 12, 'line-opacity': 0.18 } })
-      map.current.addLayer({ id, type: 'line', source: id, paint: { 'line-color': '#00e87a', 'line-width': 4, 'line-opacity': 0.95 } })
-      routeLayersRef.current = [id, idGlow]
+      const srcId = 'planned-route'
+      const glowId = 'planned-route-glow'
+      const lineId = 'planned-route-line'
+
+      map.current.addSource(srcId, {
+        type: 'geojson',
+        data: { type: 'Feature', geometry: { type: 'LineString', coordinates: coords } }
+      })
+      map.current.addLayer({
+        id: glowId, type: 'line', source: srcId,
+        paint: { 'line-color': color, 'line-width': 14, 'line-opacity': 0.18 }
+      })
+      map.current.addLayer({
+        id: lineId, type: 'line', source: srcId,
+        paint: { 'line-color': color, 'line-width': 4, 'line-opacity': 0.95 }
+      })
+      routeSourcesRef.current = [{ srcId, layers: [glowId, lineId] }]
+
       const bounds = coords.reduce((b, c) => b.extend(c), new maplibregl.LngLatBounds(coords[0], coords[0]))
       map.current.fitBounds(bounds, { padding: 80, maxZoom: 17 })
     }
+
     if (map.current.loaded()) run()
     else map.current.on('load', run)
   }
 
   const clearRouteLines = () => {
-    routeLayersRef.current.forEach(id => {
-      try { map.current?.removeLayer(id); map.current?.removeSource(id.replace('-glow','').replace('-line','')) } catch {}
+    routeSourcesRef.current.forEach(({ srcId, layers }) => {
+      layers.forEach(id => { try { map.current?.removeLayer(id) } catch {} })
+      try { map.current?.removeSource(srcId) } catch {}
     })
-    try { map.current?.removeSource('planned-route') } catch {}
-    routeLayersRef.current = []
+    routeSourcesRef.current = []
   }
 
   const clearPlan = () => {
@@ -195,7 +217,7 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
     setPlanResult(null)
   }
 
-  // ── Selected (saved) route ─────────────────────────
+  // ── Selected saved route ──────────────────────────
   useEffect(() => {
     if (!map.current || !selectedRoute) return
     const run = () => {
@@ -225,14 +247,12 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
   }, [])
 
   const startRecording = () => {
-    points.current = []
-    setElapsed(0); setDistance(0); setRecording(true)
+    points.current = []; setElapsed(0); setDistance(0); setRecording(true)
     timerRef.current = setInterval(() => setElapsed(e => e + 1), 1000)
     watchId.current = navigator.geolocation.watchPosition(pos => {
       const p = { lat: pos.coords.latitude, lng: pos.coords.longitude, timestamp: new Date().toISOString() }
       if (points.current.length > 0) setDistance(prev => prev + haversineM(points.current[points.current.length-1].lat, points.current[points.current.length-1].lng, p.lat, p.lng))
-      points.current.push(p)
-      updateLiveTrack()
+      points.current.push(p); updateLiveTrack()
       map.current?.setCenter([p.lng, p.lat])
     }, err => showToast('GPS: ' + err.message, 'error'), { enableHighAccuracy: true, maximumAge: 0 })
   }
@@ -244,10 +264,7 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
     if (points.current.length > 2) {
       setRouteName(`Route ${new Date().toLocaleDateString('en-SG', { day: 'numeric', month: 'short' })}`)
       setShowSave(true)
-    } else {
-      showToast('Not enough GPS points', 'error')
-      clearLiveTrack()
-    }
+    } else { showToast('Not enough GPS points', 'error'); clearLiveTrack() }
   }
 
   const clearLiveTrack = () => {
@@ -274,7 +291,6 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
     <div className="map-view">
       <div ref={mapRef} className="map-container" />
 
-      {/* Side panel */}
       <div className="map-panel">
         <div className="panel-tabs">
           <button className={`panel-tab ${mapMode === 'plan' ? 'active' : ''}`} onClick={() => setMapMode('plan')}>
@@ -287,18 +303,16 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
           </button>
         </div>
 
-        {/* ── Plan panel ── */}
         {mapMode === 'plan' && (
           <div className="panel-body">
             <p className="panel-hint">
               {pins.length === 0 && 'Tap the map to add waypoints'}
               {pins.length === 1 && 'Add another point to route'}
-              {pins.length >= 2 && !planLoading && !planResult && 'Tap "Find route" or add more points'}
+              {pins.length >= 2 && !planLoading && !planResult && 'Ready — tap "Find route"'}
               {planLoading && 'Finding footpath route…'}
-              {planResult && `${planResult.distKm} km · ${formatDuration(planResult.durationS)} on foot`}
+              {planResult && `🚶 ${planResult.distKm} km · ${formatDuration(planResult.durationS)}`}
             </p>
 
-            {/* Waypoint list */}
             {pins.length > 0 && (
               <div className="pin-list-panel">
                 {pins.map((p, i) => (
@@ -312,11 +326,7 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
             )}
 
             {pins.length >= 2 && (
-              <button
-                className="panel-action-btn"
-                onClick={() => findRoute(pins)}
-                disabled={planLoading}
-              >
+              <button className="panel-action-btn" onClick={() => findRoute(pins)} disabled={planLoading}>
                 {planLoading ? 'Routing…' : 'Find route'}
               </button>
             )}
@@ -327,7 +337,6 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
           </div>
         )}
 
-        {/* ── Record panel ── */}
         {mapMode === 'record' && (
           <div className="panel-body">
             {!recording ? (
@@ -350,7 +359,7 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
                     <span className="live-stat-label">Time</span>
                   </div>
                   <div className="live-stat">
-                    <span className="live-stat-val">{elapsed > 0 ? (distance / elapsed * 3.6).toFixed(1) : '0.0'}</span>
+                    <span className="live-stat-val">{elapsed > 0 ? (distance/elapsed*3.6).toFixed(1) : '0.0'}</span>
                     <span className="live-stat-label">km/h</span>
                   </div>
                 </div>
@@ -364,7 +373,6 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
         )}
       </div>
 
-      {/* Selected route banner */}
       {selectedRoute && (
         <div className="selected-route-banner">
           <span>{selectedRoute.name} · {formatDistance(selectedRoute.distance_m)}</span>
@@ -372,7 +380,6 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
         </div>
       )}
 
-      {/* Save modal */}
       {showSave && (
         <div className="modal-overlay" onClick={e => e.target === e.currentTarget && (() => { setShowSave(false); clearLiveTrack(); setElapsed(0); setDistance(0) })()}>
           <div className="modal">
