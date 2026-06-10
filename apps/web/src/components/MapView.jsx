@@ -94,11 +94,11 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
     const handleClick = (e) => {
       if (mapModeRef.current !== 'plan') return
       const { lng, lat } = e.lngLat
-      setPins(prev => {
-        const next = [...prev, { lat, lng, id: Date.now() }]
-        setTimeout(() => addMarkerToMap(next.length - 1, lat, lng, next.length), 0)
-        return next
-      })
+      const newPin = { lat, lng, id: Date.now() }
+      const next = [...pinsRef.current, newPin]
+      pinsRef.current = next
+      setPins(next)
+      addMarkerToMap(next.length - 1, lat, lng, next.length)
       clearRouteLines()
       setPlanResult(null)
     }
@@ -123,6 +123,12 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
     pinsArr.forEach((p, i) => addMarkerToMap(i, p.lat, p.lng, i + 1))
   }
 
+  const pinsRef = useRef(pins)
+  useEffect(() => { pinsRef.current = pins }, [pins])
+
+  const preferParksRef = useRef(preferParks)
+  useEffect(() => { preferParksRef.current = preferParks }, [preferParks])
+
   // ── Routing via Graphhopper (foot profile) ───────
   const findRoute = async (pinsArr) => {
     if (pinsArr.length < 2) return
@@ -131,13 +137,12 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
     setPlanResult(null)
 
     try {
-      const pointParams = pinsArr.map(p => `point=${p.lat},${p.lng}`).join('&')
+      const useParks = preferParksRef.current
 
       let res
-      if (preferParks) {
-        // Use custom_model via POST to heavily weight park/green paths
-        const url = `https://graphhopper.com/api/1/route?key=${GH_KEY}`
-        res = await fetch(url, {
+      if (useParks) {
+        // custom_model POST — correct Graphhopper syntax using encoded values
+        res = await fetch(`https://graphhopper.com/api/1/route?key=${GH_KEY}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -146,29 +151,25 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
             points_encoded: false,
             'ch.disable': true,
             custom_model: {
+              speed: [],
               priority: [
-                // Strongly prefer parks, nature reserves, leisure paths
-                { if: 'way["leisure"] == "park"',            multiply_by: '3.0' },
-                { if: 'way["leisure"] == "nature_reserve"',  multiply_by: '3.0' },
-                { if: 'way["route"] == "hiking"',            multiply_by: '2.5' },
-                { if: 'way["highway"] == "cycleway" && way["foot"] != "no"', multiply_by: '2.0' },
-                { if: 'way["highway"] == "path"',            multiply_by: '2.0' },
-                { if: 'way["highway"] == "footway"',         multiply_by: '2.0' },
-                { if: 'way["highway"] == "pedestrian"',      multiply_by: '1.8' },
-                { if: 'way["highway"] == "track"',           multiply_by: '1.5' },
-                // Discourage roads
-                { if: 'way["highway"] == "primary"',         multiply_by: '0.2' },
-                { if: 'way["highway"] == "secondary"',       multiply_by: '0.3' },
-                { if: 'way["highway"] == "tertiary"',        multiply_by: '0.5' },
-                { if: 'way["highway"] == "residential"',     multiply_by: '0.7' },
+                { if: 'road_class == TRACK',        multiply_by: '2.0' },
+                { if: 'road_class == PATH',         multiply_by: '2.0' },
+                { if: 'road_class == FOOTWAY',      multiply_by: '2.0' },
+                { if: 'road_class == CYCLEWAY',     multiply_by: '1.8' },
+                { if: 'road_class == RESIDENTIAL',  multiply_by: '0.6' },
+                { if: 'road_class == TERTIARY',     multiply_by: '0.4' },
+                { if: 'road_class == SECONDARY',    multiply_by: '0.2' },
+                { if: 'road_class == PRIMARY',      multiply_by: '0.1' },
+                { if: 'road_class == TRUNK',        multiply_by: '0.05' },
+                { if: 'road_class == MOTORWAY',     multiply_by: '0.01' },
               ]
             }
           })
         })
       } else {
-        // Standard foot routing
-        const url = `https://graphhopper.com/api/1/route?${pointParams}&profile=foot&points_encoded=false&key=${GH_KEY}`
-        res = await fetch(url)
+        const pointParams = pinsArr.map(p => `point=${p.lat},${p.lng}`).join('&')
+        res = await fetch(`https://graphhopper.com/api/1/route?${pointParams}&profile=foot&points_encoded=false&key=${GH_KEY}`)
       }
 
       if (!res.ok) {
@@ -180,8 +181,7 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
       const path = data.paths?.[0]
       if (!path) throw new Error('No route returned')
 
-      const coords = path.points.coordinates
-      drawRouteSegments(pinsArr, coords)
+      drawRouteSegments(path.points.coordinates)
       setPlanResult({
         distKm: (path.distance / 1000).toFixed(2),
         durationS: Math.round(path.time / 1000)
@@ -194,8 +194,8 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
     }
   }
 
-  // Draw route with segments colored by first-pin color
-  const drawRouteSegments = (pinsArr, coords) => {
+  // Draw route colored by first pin color
+  const drawRouteSegments = (coords) => {
     if (!map.current) return
     // Color the whole route based on the first pin's color
     const color = PIN_COLORS[0]
@@ -240,12 +240,14 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
     markersRef.current.forEach(m => m.remove())
     markersRef.current = []
     clearRouteLines()
+    pinsRef.current = []
     setPins([])
     setPlanResult(null)
   }
 
   const removePin = (idx) => {
-    const next = pins.filter((_, i) => i !== idx)
+    const next = pinsRef.current.filter((_, i) => i !== idx)
+    pinsRef.current = next
     setPins(next)
     redrawMarkers(next)
     clearRouteLines()
