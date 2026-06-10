@@ -9,6 +9,7 @@ import './index.css'
 
 const DEFAULT_SETTINGS = {
   mapStyle: 'dark',
+  preferParks: false,
 }
 
 export default function App() {
@@ -87,6 +88,7 @@ export default function App() {
               selectedRoute={selectedRoute}
               setSelectedRoute={setSelectedRoute}
               mapStyle={settings.mapStyle}
+              preferParks={settings.preferParks}
             />
           )}
           {tab === 'routes' && (
