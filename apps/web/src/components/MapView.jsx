@@ -95,36 +95,13 @@ function decodePolyline(encoded) {
   return coords
 }
 
-async function routeValhalla(waypoints) {
-  const locations = waypoints.map(p => ({ lon: p.lng, lat: p.lat }))
-  const res = await fetch('https://valhalla1.openstreetmap.de/route', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      locations,
-      costing: 'pedestrian',
-      costing_options: {
-        pedestrian: { use_roads: 0.1, use_trails: 1.0, use_living_streets: 0.3 }
-      },
-      units: 'kilometers'
-    })
-  })
-  if (!res.ok) throw new Error(`Valhalla ${res.status}`)
-  const data = await res.json()
-  if (!data.trip) throw new Error(data.error || 'No route')
-  const coords = []
-  for (const leg of data.trip.legs) coords.push(...decodePolyline(leg.shape))
-  return {
-    coords,
-    distM: data.trip.summary.length * 1000,
-    durationS: Math.round(data.trip.summary.time)
-  }
-}
-
 async function routeGH(waypoints) {
   const pointParams = waypoints.map(p => `point=${p.lat},${p.lng}`).join('&')
   const res = await fetch(`https://graphhopper.com/api/1/route?${pointParams}&profile=foot&points_encoded=false&key=${GH_KEY}`)
-  if (!res.ok) throw new Error(`GH ${res.status}`)
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.message || `Error ${res.status}`)
+  }
   const data = await res.json()
   const path = data.paths?.[0]
   if (!path) throw new Error('No route')
@@ -173,21 +150,37 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
   const buildStyle = (styleId) => {
     const s = MAP_STYLES[styleId] || MAP_STYLES.dark
     if (s.type === 'style') return s.url
+
     if (styleId === 'satellite') {
       return {
         version: 8,
+        glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
         sources: {
-          sat: { type: 'raster', tiles: s.tiles, tileSize: 256, attribution: '© Esri' },
-          labels: { type: 'raster', tiles: OSM_TILES, tileSize: 256 }
+          sat: {
+            type: 'raster',
+            tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
+            tileSize: 256,
+            attribution: '© Esri'
+          },
+          hybrid: {
+            type: 'raster',
+            tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}'],
+            tileSize: 256,
+          }
         },
         layers: [
-          { id: 'sat', type: 'raster', source: 'sat' },
-          { id: 'labels', type: 'raster', source: 'labels', paint: { 'raster-opacity': 0.35 } }
+          { id: 'sat',    type: 'raster', source: 'sat' },
+          { id: 'hybrid', type: 'raster', source: 'hybrid', paint: { 'raster-opacity': 1 } },
         ]
       }
     }
+
     // brown raster
-    return { version: 8, sources: { osm: { type: 'raster', tiles: OSM_TILES, tileSize: 256, attribution: '© OpenStreetMap' } }, layers: [{ id: 'osm', type: 'raster', source: 'osm' }] }
+    return {
+      version: 8,
+      sources: { osm: { type: 'raster', tiles: OSM_TILES, tileSize: 256, attribution: '© OpenStreetMap' } },
+      layers: [{ id: 'osm', type: 'raster', source: 'osm' }]
+    }
   }
 
   // ── Init map ──────────────────────────────────────
@@ -213,7 +206,12 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
     if (!map.current) return
     map.current.setStyle(buildStyle(mapStyle))
     const canvas = mapRef.current?.querySelector('canvas')
-    if (canvas) canvas.style.filter = MAP_STYLES[mapStyle]?.filter === 'none' ? 'none' : (MAP_STYLES[mapStyle]?.filter || 'none')
+    if (canvas) {
+      // Only apply CSS filter for brown raster style
+      canvas.style.filter = mapStyle === 'brown'
+        ? 'brightness(0.62) saturate(0.5) hue-rotate(180deg) invert(1) sepia(0.3)'
+        : 'none'
+    }
   }, [mapStyle])
 
   // ── Map click → place pin ─────────────────────────
@@ -270,13 +268,8 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
         waypoints = enriched
       }
 
-      // Route through all waypoints using Valhalla (prefer trails) or GH (standard)
-      let result
-      try {
-        result = await routeValhalla(waypoints)
-      } catch {
-        result = await routeGH(waypoints)
-      }
+      // Route through all waypoints using Graphhopper foot profile
+      const result = await routeGH(waypoints)
 
       drawRoute(result.coords)
       setPlanResult({ distKm: (result.distM / 1000).toFixed(2), durationS: result.durationS })
