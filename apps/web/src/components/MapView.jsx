@@ -129,7 +129,7 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
   const preferParksRef = useRef(preferParks)
   useEffect(() => { preferParksRef.current = preferParks }, [preferParks])
 
-  // ── Routing via Graphhopper (foot profile) ───────
+  // ── Routing via Graphhopper ───────────────────────
   const findRoute = async (pinsArr) => {
     if (pinsArr.length < 2) return
     setPlanLoading(true)
@@ -137,40 +137,12 @@ export default function MapView({ user, selectedRoute, setSelectedRoute, mapStyl
     setPlanResult(null)
 
     try {
-      const useParks = preferParksRef.current
-
-      let res
-      if (useParks) {
-        // custom_model POST — correct Graphhopper syntax using encoded values
-        res = await fetch(`https://graphhopper.com/api/1/route?key=${GH_KEY}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            points: pinsArr.map(p => [p.lng, p.lat]),
-            profile: 'foot',
-            points_encoded: false,
-            'ch.disable': true,
-            custom_model: {
-              speed: [],
-              priority: [
-                { if: 'road_class == TRACK',        multiply_by: '2.0' },
-                { if: 'road_class == PATH',         multiply_by: '2.0' },
-                { if: 'road_class == FOOTWAY',      multiply_by: '2.0' },
-                { if: 'road_class == CYCLEWAY',     multiply_by: '1.8' },
-                { if: 'road_class == RESIDENTIAL',  multiply_by: '0.6' },
-                { if: 'road_class == TERTIARY',     multiply_by: '0.4' },
-                { if: 'road_class == SECONDARY',    multiply_by: '0.2' },
-                { if: 'road_class == PRIMARY',      multiply_by: '0.1' },
-                { if: 'road_class == TRUNK',        multiply_by: '0.05' },
-                { if: 'road_class == MOTORWAY',     multiply_by: '0.01' },
-              ]
-            }
-          })
-        })
-      } else {
-        const pointParams = pinsArr.map(p => `point=${p.lat},${p.lng}`).join('&')
-        res = await fetch(`https://graphhopper.com/api/1/route?${pointParams}&profile=foot&points_encoded=false&key=${GH_KEY}`)
-      }
+      // foot = standard pedestrian routing
+      // hike = prefers trails, footpaths, parks over roads (free tier supported)
+      const profile = preferParksRef.current ? 'hike' : 'foot'
+      const pointParams = pinsArr.map(p => `point=${p.lat},${p.lng}`).join('&')
+      const url = `https://graphhopper.com/api/1/route?${pointParams}&profile=${profile}&points_encoded=false&key=${GH_KEY}`
+      const res = await fetch(url)
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
