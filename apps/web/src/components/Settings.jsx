@@ -1,4 +1,4 @@
-export default function Settings({ settings, updateSetting, onClose }) {
+export default function Settings({ onClose }) {
   const requestLocation = () => {
     if (!('geolocation' in navigator)) { alert('Geolocation not supported.'); return }
     navigator.geolocation.getCurrentPosition(
@@ -14,39 +14,12 @@ export default function Settings({ settings, updateSetting, onClose }) {
         <span className="settings-title">Settings</span>
         <button className="settings-close" onClick={onClose}>✕</button>
       </div>
-
       <div className="settings-section">
-        <div className="settings-label">Map style</div>
-        <div className="settings-toggle-row" style={{ flexDirection: 'column', gap: 6 }}>
-          {[
-            { id: 'dark',  label: '🌑 Dark' },
-            { id: 'light', label: '☀️ Light' },
-            { id: 'brown', label: '🗺️ Light Brown' },
-          ].map(s => (
-            <button
-              key={s.id}
-              className={`style-btn ${settings.mapStyle === s.id ? 'active' : ''}`}
-              onClick={() => updateSetting('mapStyle', s.id)}
-            >
-              {s.label}
-            </button>
-          ))}
-        </div>
+        <div className="settings-label">Map style &amp; routing</div>
+        <p style={{ fontSize: 12, color: 'var(--text3)', lineHeight: 1.5 }}>
+          Use the 🗺️ and 🌳 buttons on the map to change map style and toggle park routing.
+        </p>
       </div>
-
-      <div className="settings-section">
-        <div className="settings-label">Routing</div>
-        <div className="settings-toggle-item" onClick={() => updateSetting('preferParks', !settings.preferParks)}>
-          <div className="settings-toggle-info">
-            <div className="settings-toggle-name">🌳 Prefer parks & green paths</div>
-            <div className="settings-toggle-desc">Routes through parks and park connectors even if it's a longer distance</div>
-          </div>
-          <div className={`toggle-switch ${settings.preferParks ? 'on' : ''}`}>
-            <div className="toggle-knob" />
-          </div>
-        </div>
-      </div>
-
       <div className="settings-section">
         <div className="settings-label">Location</div>
         <button className="settings-action-btn" onClick={requestLocation}>
